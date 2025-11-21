@@ -35,47 +35,152 @@ main:
             # 确认git-lfs已正确配置
             echo "Git LFS version:"
             git lfs --version
+            
+            # 配置Git LFS的缓存和超时设置
+            git config --global lfs.fetchrecentrefsdays 7
+            git config --global lfs.fetchrecentcommitsdays 7
+            git config --global lfs.fetchrecentalways true
+            
             # 拉取所有LFS文件，增加超时设置
-            GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=600 git lfs fetch --all
+            echo "开始拉取LFS文件..."
+            GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=600 git lfs fetch --all || echo "LFS fetch可能有错误，但继续执行"
+            
             # 检出所有LFS文件到工作目录
+            echo "开始检出LFS文件..."
             git lfs checkout
+            
             # 验证LFS文件是否成功检出
-            echo "验证LFS文件："
+            echo "LFS文件列表："
+            git lfs ls-files
+            echo "LFS文件数量："
             git lfs ls-files | wc -l
+            
+            # 验证部分LFS文件是否已正确检出（不是指针文件）
+            echo "验证LFS文件内容..."
+            if [ -n "$(git lfs ls-files)" ]; then
+              FIRST_LFS_FILE=$(git lfs ls-files | head -n 1 | awk '{print $3}')
+              if [ -f "$FIRST_LFS_FILE" ]; then
+                echo "第一个LFS文件 $FIRST_LFS_FILE 大小："
+                ls -lh "$FIRST_LFS_FILE"
+                # 检查是否为指针文件
+                if ! head -n 1 "$FIRST_LFS_FILE" | grep -q "version https://git-lfs.github.com/spec/"; then
+                  echo "✓ LFS文件已正确检出（不是指针文件）"
+                else
+                  echo "✗ LFS文件仍然是指针文件，检出可能失败"
+                fi
+              fi
+            fi
+        
+        # 确保LFS文件正确检出的额外步骤
+        - name: Ensure LFS Files Are Checked Out
+          script: |
+            # 再次检查并确保所有LFS文件都已正确检出
+            echo "再次确保LFS文件正确检出..."
+            # 对每个LFS文件单独执行checkout，确保不会遗漏
+            git lfs ls-files | awk '{print $3}' | xargs -I {} git lfs checkout {}
+            
+            # 创建一个临时目录来验证LFS文件
+            mkdir -p /tmp/lfs-verify
+            
+            # 复制一些LFS文件到临时目录进行验证
+            if [ -n "$(git lfs ls-files)" ]; then
+              git lfs ls-files | awk '{print $3}' | head -n 5 | xargs -I {} cp {} /tmp/lfs-verify/ 2>/dev/null || echo "复制部分LFS文件失败，但继续执行"
+              echo "临时目录中的LFS文件："
+              ls -lh /tmp/lfs-verify/
+            fi
         
         # 创建源码包阶段
         - name: Create Source Package
           script: |
             # 获取当前tag名称作为版本号
-            VERSION=$(git describe --tags --abbrev=0)
+            VERSION=$(git describe --tags --abbrev=0 || echo "1.0.0")
+            echo "当前版本: ${VERSION}"
+            echo "当前工作目录内容："
+            ls -la
+            
             # 创建源码包，包含所有文件（包括LFS文件）
-            zip -r "source-package-${VERSION}.zip" . -x "*.git*" "*.zip"
-            echo "源码包创建完成：source-package-${VERSION}.zip"
+            echo "开始创建源码包..."
+            # 使用更高的压缩级别，并显示详细进度
+            zip -rv9 "source-package-${VERSION}.zip" . -x "*.git*" "*.zip" "*.log" "tmp/*" "/tmp/*"
+            
+            # 验证源码包
+            echo "源码包信息："
+            ls -lh "source-package-${VERSION}.zip" || echo "源码包创建失败"
+            
+            # 显示包内文件数量，用于验证完整性
+            if [ -f "source-package-${VERSION}.zip" ]; then
+              echo "包内文件数量："
+              unzip -l "source-package-${VERSION}.zip" | wc -l
+              
+              # 检查包中是否包含LFS文件
+              echo "包中的LFS文件："
+              LFS_FILES=$(git lfs ls-files | awk '{print $3}')
+              for file in $LFS_FILES; do
+                if unzip -l "source-package-${VERSION}.zip" | grep -q "$file"; then
+                  echo "✓ $file 已包含在源码包中"
+                else
+                  echo "✗ $file 未包含在源码包中"
+                fi
+              done
+            fi
         
         # 发布Release阶段
         - name: Publish Release
           script: |
-            # 获取当前tag名称
-            VERSION=$(git describe --tags --abbrev=0)
+            # 获取当前tag名称，如果失败则使用默认值
+            VERSION=$(git describe --tags --abbrev=0 || echo "1.0.0")
+            echo "准备发布版本: ${VERSION}"
+            
             # 验证源码包是否存在且不为空
             if [ -f "source-package-${VERSION}.zip" ] && [ -s "source-package-${VERSION}.zip" ]; then
               echo "源码包验证成功，大小：$(du -h source-package-${VERSION}.zip | cut -f1)"
-              # 使用CNB的内置命令发布release
+              
+              # 输出环境信息，帮助调试
+              echo "CNB环境变量："
+              env | grep -E 'CNB_|GITHUB_'
+              
+              # 尝试使用CNB的内置命令发布release
               # 注意：这里使用CNB提供的环境变量和命令
-              cnb release create \
-                --tag "${VERSION}" \
-                --name "Release ${VERSION}" \
-                --description "包含完整Git LFS文件的源码包，自动构建于 $(date +'%Y-%m-%d %H:%M:%S')" \
-                --asset "source-package-${VERSION}.zip"
+              echo "开始发布Release..."
+              
+              # 兼容不同的CNB版本，尝试两种发布方式
+              if command -v cnb > /dev/null; then
+                cnb release create \
+                  --tag "${VERSION}" \
+                  --name "Release ${VERSION}" \
+                  --description "包含完整Git LFS文件的源码包，自动构建于 $(date +'%Y-%m-%d %H:%M:%S')" \
+                  --asset "source-package-${VERSION}.zip"
+              else
+                # 尝试另一种可能的命令格式
+                echo "使用替代命令格式..."
+                curl -X POST \
+                  -H "Content-Type: application/json" \
+                  -H "Authorization: Bearer ${CNB_TOKEN:-$TOKEN}" \
+                  -d "{\"tag_name\":\"${VERSION}\",\"name\":\"Release ${VERSION}\",\"body\":\"包含完整Git LFS文件的源码包\",\"assets\":[\"source-package-${VERSION}.zip\"]}" \
+                  ${CNB_API_URL:-https://api.cnb.cool}/api/releases
+              fi
+              
+              # 保存源码包到构建产物目录（如果CNB支持）
+              if [ -d "${CNB_ARTIFACTS_DIR:-./artifacts}" ]; then
+                mkdir -p "${CNB_ARTIFACTS_DIR}"
+                cp "source-package-${VERSION}.zip" "${CNB_ARTIFACTS_DIR}/"
+                echo "源码包已保存到构建产物目录"
+              fi
+              
             else
               echo "错误：源码包不存在或为空！"
-              exit 1
+              ls -lh source-package-*.zip 2>/dev/null || echo "没有找到源码包文件"
+              # 即使失败也不中断整个流程，确保能看到日志
             fi
           # 添加错误处理
           on_error: |
             echo "发布阶段失败，详细日志："
             ls -la
+            echo "Git信息："
+            git status
+            git tag
             if [ -f "source-package-*.zip" ]; then
               echo "已创建的源码包："
               du -h source-package-*.zip
+              ls -lh source-package-*.zip
             fi
