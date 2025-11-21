@@ -6,19 +6,18 @@ on:
       - 'v*'
 
 jobs:
-  build:
+  create-release:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout code with LFS
         uses: actions/checkout@v4
         with:
-          lfs: true # 关键！启用 LFS 拉取
-
-      - name: Create Source Tarball
-        run: |
-          tar -czvf release-${GITHUB_REF#refs/tags/}.tar.gz --exclude='.git' --exclude='.gitattributes' .
-
-      - name: Upload to Release
+          lfs: true
+          
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release-*.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
