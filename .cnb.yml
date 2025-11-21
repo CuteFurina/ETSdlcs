@@ -1,0 +1,81 @@
+# CNB构建配置文件
+# 功能：自动构建并发布包含完整Git LFS文件的源码包
+
+main:
+  # 触发规则：当创建tags时触发构建
+  tags:
+    - name: Release Build with Git LFS
+      # 指定Runner配置
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 4
+        memory: 8GiB  # 显式指定内存以确保足够资源处理LFS文件
+      # 指定Docker镜像，使用包含git和git-lfs的环境
+      docker:
+        image: ubuntu:22.04  # 使用具体版本号的镜像以保证一致性
+        # 挂载缓存卷以加速依赖安装
+        volumes:
+          - cache:/var/cache/apt
+      # 流水线阶段
+      stages:
+        # 准备环境阶段
+        - name: Prepare Environment
+          script: |
+            # 安装必要的依赖
+            apt-get update
+            apt-get install -y --no-install-recommends git git-lfs zip curl
+            # 初始化git-lfs
+            git lfs install
+            # 配置git以处理大文件
+            git config --global http.postBuffer 1048576000
+        
+        # 拉取完整代码阶段（包括LFS文件）
+        - name: Fetch Complete Code
+          script: |
+            # 确认git-lfs已正确配置
+            echo "Git LFS version:"
+            git lfs --version
+            # 拉取所有LFS文件，增加超时设置
+            GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=600 git lfs fetch --all
+            # 检出所有LFS文件到工作目录
+            git lfs checkout
+            # 验证LFS文件是否成功检出
+            echo "验证LFS文件："
+            git lfs ls-files | wc -l
+        
+        # 创建源码包阶段
+        - name: Create Source Package
+          script: |
+            # 获取当前tag名称作为版本号
+            VERSION=$(git describe --tags --abbrev=0)
+            # 创建源码包，包含所有文件（包括LFS文件）
+            zip -r "source-package-${VERSION}.zip" . -x "*.git*" "*.zip"
+            echo "源码包创建完成：source-package-${VERSION}.zip"
+        
+        # 发布Release阶段
+        - name: Publish Release
+          script: |
+            # 获取当前tag名称
+            VERSION=$(git describe --tags --abbrev=0)
+            # 验证源码包是否存在且不为空
+            if [ -f "source-package-${VERSION}.zip" ] && [ -s "source-package-${VERSION}.zip" ]; then
+              echo "源码包验证成功，大小：$(du -h source-package-${VERSION}.zip | cut -f1)"
+              # 使用CNB的内置命令发布release
+              # 注意：这里使用CNB提供的环境变量和命令
+              cnb release create \
+                --tag "${VERSION}" \
+                --name "Release ${VERSION}" \
+                --description "包含完整Git LFS文件的源码包，自动构建于 $(date +'%Y-%m-%d %H:%M:%S')" \
+                --asset "source-package-${VERSION}.zip"
+            else
+              echo "错误：源码包不存在或为空！"
+              exit 1
+            fi
+          # 添加错误处理
+          on_error: |
+            echo "发布阶段失败，详细日志："
+            ls -la
+            if [ -f "source-package-*.zip" ]; then
+              echo "已创建的源码包："
+              du -h source-package-*.zip
+            fi
