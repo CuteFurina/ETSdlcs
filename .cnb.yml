@@ -2,9 +2,26 @@
 # 功能：自动构建并发布包含完整Git LFS文件的源码包
 
 main:
-  # 触发规则：当创建tags时触发构建
+  # 触发规则配置
+  # 1. Tag触发 - 用于正式版本发布
   tags:
     - name: Release Build with Git LFS
+      # 明确指定tag匹配模式，确保任何tag创建都能触发
+      pattern: "*"
+      # 确保构建在列表中可见
+      visible: true
+      # 设置构建描述，增强可识别性
+      description: "由Tag创建触发的源码包构建，包含完整Git LFS文件"
+  
+  # 2. Push触发 - 增加push触发以提高构建可见性和可靠性
+  push:
+    - name: Push Trigger Build
+      branches:
+        - "main"
+        - "master"
+        - "/^release\/.*/"  # 匹配release/开头的分支
+      visible: true
+      description: "由代码推送触发的测试构建，用于验证配置"
       # 指定Runner配置
       runner:
         tags: cnb:arch:amd64
@@ -21,6 +38,15 @@ main:
         # 准备环境阶段
         - name: Prepare Environment
           script: |
+            # 显示构建上下文信息，帮助调试和跟踪
+            echo "=== 构建环境信息 ==="
+            echo "当前时间: $(date)"
+            echo "当前用户: $(whoami)"
+            echo "工作目录: $(pwd)"
+            echo "CNB构建ID: ${CNB_BUILD_ID:-未设置}"
+            echo "触发事件: ${CNB_EVENT_TYPE:-未设置}"
+            echo "触发分支/标签: ${CNB_REF_NAME:-未设置}"
+            
             # 安装必要的依赖
             apt-get update
             apt-get install -y --no-install-recommends git git-lfs zip curl
@@ -28,6 +54,16 @@ main:
             git lfs install
             # 配置git以处理大文件
             git config --global http.postBuffer 1048576000
+            
+            # 显示CNB环境变量，便于调试
+            echo "=== CNB环境变量 ==="
+            env | grep -i "CNB_" || echo "未找到CNB相关环境变量"
+            
+            # 显示Git配置信息
+            echo "=== Git配置 ==="
+            git config --list
+            echo "=== Git远程仓库 ==="
+            git remote -v
         
         # 拉取完整代码阶段（包括LFS文件）
         - name: Fetch Complete Code
@@ -127,60 +163,138 @@ main:
         # 发布Release阶段
         - name: Publish Release
           script: |
+            # 显示详细的发布阶段信息，增强可见性
+            echo "=== 发布阶段开始 ==="
+            echo "当前时间: $(date)"
+            
             # 获取当前tag名称，如果失败则使用默认值
             VERSION=$(git describe --tags --abbrev=0 || echo "1.0.0")
             echo "准备发布版本: ${VERSION}"
             
+            # 显示完整的Git信息，帮助调试
+            echo "=== Git详情 ==="
+            git branch -a
+            git tag -l
+            git log -n 5 --pretty=format:"%h - %an, %ar : %s"
+            
             # 验证源码包是否存在且不为空
             if [ -f "source-package-${VERSION}.zip" ] && [ -s "source-package-${VERSION}.zip" ]; then
               echo "源码包验证成功，大小：$(du -h source-package-${VERSION}.zip | cut -f1)"
+              echo "源码包详细信息："
+              stat source-package-${VERSION}.zip
               
-              # 输出环境信息，帮助调试
-              echo "CNB环境变量："
-              env | grep -E 'CNB_|GITHUB_'
+              # 输出完整环境信息，帮助调试
+              echo "=== 完整环境变量 ==="
+              env | sort
               
-              # 尝试使用CNB的内置命令发布release
-              # 注意：这里使用CNB提供的环境变量和命令
+              # 创建发布记录文件，用于验证构建过程
+              echo "构建信息记录" > build-info.txt
+              echo "构建时间: $(date)" >> build-info.txt
+              echo "构建ID: ${CNB_BUILD_ID:-未知}" >> build-info.txt
+              echo "版本: ${VERSION}" >> build-info.txt
+              echo "源码包大小: $(du -h source-package-${VERSION}.zip | cut -f1)" >> build-info.txt
+              cat build-info.txt
+              
+              # 尝试使用CNB的内置命令发布release，添加详细日志
               echo "开始发布Release..."
+              echo "使用CNB命令发布..."
               
               # 兼容不同的CNB版本，尝试两种发布方式
               if command -v cnb > /dev/null; then
+                echo "使用cnb命令..."
+                # 先显示命令，再执行
+                echo "执行: cnb release create --tag \"${VERSION}\" --name \"Release ${VERSION}\" --description \"包含完整Git LFS文件的源码包，自动构建于 $(date +'%Y-%m-%d %H:%M:%S')\" --asset \"source-package-${VERSION}.zip\""
+                # 执行命令并保存输出
                 cnb release create \
                   --tag "${VERSION}" \
                   --name "Release ${VERSION}" \
                   --description "包含完整Git LFS文件的源码包，自动构建于 $(date +'%Y-%m-%d %H:%M:%S')" \
-                  --asset "source-package-${VERSION}.zip"
+                  --asset "source-package-${VERSION}.zip" 2>&1 | tee release-output.txt
+                RELEASE_EXIT_CODE=$?
+                echo "发布命令退出码: ${RELEASE_EXIT_CODE}"
               else
                 # 尝试另一种可能的命令格式
-                echo "使用替代命令格式..."
-                curl -X POST \
+                echo "使用HTTP API发布..."
+                echo "CNB_API_URL: ${CNB_API_URL:-未设置}"
+                # 构建JSON数据但不直接输出完整token
+                JSON_DATA="{\"tag_name\":\"${VERSION}\",\"name\":\"Release ${VERSION}\",\"body\":\"包含完整Git LFS文件的源码包，自动构建于 $(date +'%Y-%m-%d %H:%M:%S')\",\"assets\":[\"source-package-${VERSION}.zip\"]}"
+                echo "JSON数据: ${JSON_DATA}"
+                
+                # 执行curl命令
+                curl -v -X POST \
                   -H "Content-Type: application/json" \
-                  -H "Authorization: Bearer ${CNB_TOKEN:-$TOKEN}" \
-                  -d "{\"tag_name\":\"${VERSION}\",\"name\":\"Release ${VERSION}\",\"body\":\"包含完整Git LFS文件的源码包\",\"assets\":[\"source-package-${VERSION}.zip\"]}" \
-                  ${CNB_API_URL:-https://api.cnb.cool}/api/releases
+                  -H "Authorization: Bearer ${CNB_TOKEN:-$TOKEN:-未设置}" \
+                  -d "${JSON_DATA}" \
+                  ${CNB_API_URL:-https://api.cnb.cool}/api/releases 2>&1 | tee release-output.txt
+                RELEASE_EXIT_CODE=$?
+                echo "发布命令退出码: ${RELEASE_EXIT_CODE}"
               fi
               
-              # 保存源码包到构建产物目录（如果CNB支持）
-              if [ -d "${CNB_ARTIFACTS_DIR:-./artifacts}" ]; then
-                mkdir -p "${CNB_ARTIFACTS_DIR}"
-                cp "source-package-${VERSION}.zip" "${CNB_ARTIFACTS_DIR}/"
-                echo "源码包已保存到构建产物目录"
+              # 保存所有重要文件到构建产物目录，确保可追踪性
+              mkdir -p ./artifacts
+              cp "source-package-${VERSION}.zip" ./artifacts/
+              cp build-info.txt ./artifacts/
+              if [ -f release-output.txt ]; then
+                cp release-output.txt ./artifacts/
               fi
+              echo "所有构建产物已保存到 ./artifacts/ 目录"
+              ls -la ./artifacts/
               
             else
               echo "错误：源码包不存在或为空！"
               ls -lh source-package-*.zip 2>/dev/null || echo "没有找到源码包文件"
-              # 即使失败也不中断整个流程，确保能看到日志
+              # 创建错误日志文件
+              echo "错误详情: 源码包创建失败" > build-error.txt
+              echo "时间: $(date)" >> build-error.txt
+              echo "版本: ${VERSION}" >> build-error.txt
+              cat build-error.txt
             fi
-          # 添加错误处理
+          # 添加详细的错误处理和日志
           on_error: |
-            echo "发布阶段失败，详细日志："
+            echo "=== 发布阶段失败 - 详细错误分析 ==="
+            echo "失败时间: $(date)"
+            
+            # 显示完整的目录结构和文件信息
+            echo "=== 当前目录内容 ==="
             ls -la
-            echo "Git信息："
-            git status
-            git tag
+            
+            # 显示详细的Git状态
+            echo "=== Git详细状态 ==="
+            git status -v
+            git tag -l
+            git remote -v
+            
+            # 检查源码包文件
+            echo "=== 源码包检查 ==="
             if [ -f "source-package-*.zip" ]; then
               echo "已创建的源码包："
-              du -h source-package-*.zip
               ls -lh source-package-*.zip
+              du -h source-package-*.zip
+              # 检查包的基本信息
+              unzip -l source-package-*.zip | head -n 20
+            else
+              echo "未找到源码包文件"
+              find . -name "*.zip" 2>/dev/null || echo "没有找到任何ZIP文件"
             fi
+            
+            # 显示CNB特定的错误信息和环境
+            echo "=== CNB构建环境错误详情 ==="
+            echo "构建ID: ${CNB_BUILD_ID:-未知}"
+            echo "构建URL: ${CNB_BUILD_URL:-未知}"
+            echo "构建状态: ${CNB_BUILD_STATUS:-未知}"
+            
+            # 创建错误报告文件
+            mkdir -p ./error-reports
+            ERROR_REPORT="./error-reports/error-$(date +'%Y%m%d-%H%M%S').txt"
+            echo "CNB构建错误报告" > "${ERROR_REPORT}"
+            echo "时间: $(date)" >> "${ERROR_REPORT}"
+            echo "构建ID: ${CNB_BUILD_ID:-未知}" >> "${ERROR_REPORT}"
+            echo "" >> "${ERROR_REPORT}"
+            echo "目录内容:" >> "${ERROR_REPORT}"
+            ls -la >> "${ERROR_REPORT}"
+            echo "" >> "${ERROR_REPORT}"
+            echo "Git状态:" >> "${ERROR_REPORT}"
+            git status >> "${ERROR_REPORT}"
+            
+            echo "错误报告已保存到: ${ERROR_REPORT}"
+            echo "=== 错误分析结束 ==="
