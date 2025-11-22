@@ -30,9 +30,7 @@ main:
       # 指定Docker镜像，使用包含git和git-lfs的环境
       docker:
         image: ubuntu:22.04  # 使用具体版本号的镜像以保证一致性
-        # 挂载缓存卷以加速依赖安装
-        volumes:
-          - cache:/var/cache/apt
+        # 移除不允许的卷挂载路径
       # 流水线阶段
       stages:
         # 准备环境阶段
