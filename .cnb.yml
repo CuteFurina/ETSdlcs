@@ -1,0 +1,23 @@
+version: 1
+name: my-project
+build:
+  steps:
+    - name: checkout-with-lfs
+      run: |
+        git lfs pull
+        git lfs checkout
+
+    - name: package-source
+      run: |
+        VERSION=${CI_COMMIT_TAG:-latest}
+        ARCHIVE_NAME="欧卡2全DLC ${VERSION}.tar.gz"
+        tar --exclude='.git' -czf "$ARCHIVE_NAME" .
+        echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $CNB_ENV
+
+    - name: upload-release-asset
+      uses: cnb/action-release-upload@v1
+      with:
+        tag: ${{ CI_COMMIT_TAG }}
+        asset_name: ${{ env.ARCHIVE_NAME }}
+        asset_path: ./${{ env.ARCHIVE_NAME }}
+        token: ${{ secrets.CNB_GIT_TOKEN }}
